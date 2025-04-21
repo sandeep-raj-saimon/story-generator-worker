@@ -27,7 +27,7 @@ Update the `.env` file with your AWS credentials and configuration:
 - `AWS_SECRET_ACCESS_KEY`: Your AWS secret key
 - `AWS_S3_REGION_NAME`: AWS region (e.g., ap-south-1)
 - `AWS_STORAGE_BUCKET_NAME`: S3 bucket name for PDF storage
-- `PDF_GENERATION_QUEUE_URL`: SQS queue URL for PDF generation requests
+- `STORY_GENERATION_QUEUE_URL`: SQS queue URL
 - `API_BASE_URL`: Base URL of your API
 - `API_TOKEN`: API authentication token
 
