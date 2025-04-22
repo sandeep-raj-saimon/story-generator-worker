@@ -25,6 +25,16 @@ class BaseHandler:
         self.sqs_client = boto3.client('sqs', region_name=aws_region)
         self.bucket_name = os.getenv('AWS_STORAGE_BUCKET_NAME')
 
+    def create_revision(self, story_id, format, url=None, sub_format=None):
+        """Create a new revision for a story."""
+        with self.conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute("""
+                INSERT INTO core_revision (story_id, format, url, sub_format, created_at, is_current)
+                VALUES (%s, %s, %s, %s, NOW(), TRUE)
+                RETURNING id
+            """, (story_id, format, url, sub_format))
+            return dict(cursor.fetchone())
+        
     def fetch_story_data(self, story_id, user_id):
         """Fetch story and scenes data from database."""
         with self.conn.cursor(cursor_factory=RealDictCursor) as cursor:

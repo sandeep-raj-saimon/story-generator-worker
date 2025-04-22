@@ -120,11 +120,20 @@ class PDFGenerationHandler(BaseHandler):
             print(error_msg)
             raise Exception(error_msg)
 
-    def upload_to_s3(self, pdf_data, story_id, user_id):
+    def update_revision(self, revision_id, pdf_url):
+        """Update revision with PDF URL."""
+        try:
+            self.conn.cursor().execute("UPDATE core_revision SET url = %s WHERE id = %s", (pdf_url, revision_id))
+            self.conn.commit()
+        except Exception as e:
+            error_msg = f"Failed to update revision: {str(e)}\nTraceback:\n{traceback.format_exc()}"
+            print(error_msg)
+            raise Exception(error_msg)
+    
+    def upload_to_s3(self, pdf_data, story_id, revision_id):
         """Upload generated PDF to S3."""
         try:
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            filename = f"story_{story_id}/preview_{timestamp}.pdf"
+            filename = f"story_{story_id}/preview_{revision_id}.pdf"
             
             print(f"Attempting to upload PDF to S3: {filename}")
             self.s3_client.put_object(
@@ -141,7 +150,7 @@ class PDFGenerationHandler(BaseHandler):
             print(error_msg)
             raise Exception(error_msg)
 
-    def send_notification(self, story_id, user_id, pdf_url):
+    def send_notification(self, story_id, user_id, pdf_url, revision_id):
         """Send notification about completed PDF generation."""
         # Here you would implement your notification system
         # This could be a WebSocket message, SNS topic, or another SQS queue
@@ -164,12 +173,19 @@ class PDFGenerationHandler(BaseHandler):
             pdf_data = self.generate_pdf(story_data)
             print(f"Successfully generated PDF")
             
+            revision = self.create_revision(story_id, 'pdf')
+            print(f"Successfully created revision", revision)
+
             # Upload to S3
-            pdf_url = self.upload_to_s3(pdf_data, story_id, user_id)
+            pdf_url = self.upload_to_s3(pdf_data, story_id, revision['id'])
             print(f"Successfully uploaded PDF to S3: {pdf_url}")
-            
+                
+            # update revision
+            self.update_revision(revision['id'], pdf_url)
+            print(f"Successfully updated revision", revision)
+
             # Send notification
-            self.send_notification(story_id, user_id, pdf_url)
+            self.send_notification(story_id, user_id, pdf_url, revision['id'])
             print(f"Successfully sent notification")
             
             return {
