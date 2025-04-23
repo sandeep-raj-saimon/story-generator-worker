@@ -42,10 +42,10 @@ class PDFGenerationHandler(BaseHandler):
             print(traceback.format_exc())
             raise
 
-    def fetch_story_data(self, story_id, user_id):
+    def fetch_story_data(self, story_id, user_id, format=None):
         """Fetch story and scenes data from database."""
         try:
-            return super().fetch_story_data(story_id, user_id)
+            return super().fetch_story_data(story_id, user_id, format)
         except Exception as e:
             error_msg = f"Failed to fetch story data: {str(e)}\nTraceback:\n{traceback.format_exc()}"
             print(error_msg)
@@ -131,19 +131,20 @@ class PDFGenerationHandler(BaseHandler):
             print(error_msg)
             raise Exception(error_msg)
     
-    def upload_to_s3(self, pdf_data, story_id, revision_id):
+    def upload_to_s3(self, pdf_data, story_id, revision_id, format):
         """Upload generated PDF to S3."""
         try:
-            filename = f"story_{story_id}/preview_{revision_id}.pdf"
+            filename = f"story_{story_id}/preview_{revision_id}.{format}"
             
             print(f"Attempting to upload PDF to S3: {filename}")
+            content_type = 'audio/mpeg' if format == 'mp3' else 'application/pdf'
             self.s3_client.put_object(
                 Bucket=self.bucket_name,
                 Key=filename,
                 Body=pdf_data,
-                ContentType='application/pdf'
+                ContentType=content_type
             )
-            print(f"Successfully uploaded PDF to S3")
+            print(f"Successfully uploaded {format} to S3")
             
             return f"https://{self.bucket_name}.s3.amazonaws.com/{filename}"
         except Exception as e:
@@ -339,7 +340,7 @@ class PDFGenerationHandler(BaseHandler):
             print(f"Starting PDF generation for story_id: {story_id}, user_id: {user_id}")
             
             # Fetch story data
-            story_data = self.fetch_story_data(story_id, user_id)
+            story_data = self.fetch_story_data(story_id, user_id, 'image')
             print("Successfully fetched story data")
             
             # Generate PDF
@@ -350,7 +351,7 @@ class PDFGenerationHandler(BaseHandler):
             print(f"Successfully created revision", revision)
 
             # Upload to S3
-            pdf_url = self.upload_to_s3(pdf_data, story_id, revision['id'])
+            pdf_url = self.upload_to_s3(pdf_data, story_id, revision['id'], 'pdf')
             print(f"Successfully uploaded PDF to S3: {pdf_url}")
             
             self.update_revision(revision['id'], pdf_url)
@@ -374,10 +375,59 @@ class PDFGenerationHandler(BaseHandler):
 
     def handle_audio_generation(self, story_id, user_id):
         """Handle audio generation request."""
-        return {
-            'status': 'error',
-            'error': 'Audio generation not implemented'
-        }
+        # fetch all audios of the story
+        try:
+            print(f"Starting audio generation for story_id: {story_id}, user_id: {user_id}")
+            
+            # Fetch story data
+            story_data = self.fetch_story_data(story_id, user_id, 'audio')
+            print("Successfully fetched story data")
+
+            # Create revision for tracking
+            revision = self.create_revision(story_id, 'audio')
+            print(f"Successfully created revision", revision)
+
+            # Get all audio files from story scenes
+            audio_files = []
+            print(f"Story data", story_data)
+            for scene in story_data['scenes']:
+                audio_media = [m for m in scene.get('media', []) if m['media_type'] == 'audio']
+                if audio_media:
+                    audio_files.extend(audio_media)
+            print(f"Successfully fetched audio files for story_id: {story_id}, revision_id: {revision['id']}")
+
+            if not audio_files:
+                raise Exception("No audio files found in story")
+            # we need to merge all audio files and then upload it to s3
+            audio_files = self.merge_audio_files(audio_files, story_id, revision['id'])
+            print(f"Successfully merged audio files for story_id: {story_id}, revision_id: {revision['id']}")
+            # upload the merged audio to s3
+            audio_url = self.upload_to_s3(audio_files, story_id, revision['id'], 'mp3')
+            print(f"Successfully uploaded audio to S3: {audio_url}")
+
+
+            # TODO: Implement audio concatenation logic here
+            # For now just return the first audio URL
+            
+            self.update_revision(revision['id'], audio_url)
+            print(f"Successfully updated revision with audio URL")
+
+            # Send notification
+            self.send_notification(story_id, user_id, audio_url, revision['id'])
+            print("Successfully sent notification")
+
+            return {
+                'status': 'success',
+                'audio_url': audio_url
+            }
+
+        except Exception as e:
+            error_msg = f"Error handling audio generation: {str(e)}\nTraceback:\n{traceback.format_exc()}"
+            print(error_msg)
+            return {
+                'status': 'error',
+                'error': error_msg
+            }
 
     def handle_video_generation(self, story_id, user_id):
         """Handle video generation request."""

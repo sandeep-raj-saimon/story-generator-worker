@@ -5,6 +5,11 @@ from dotenv import load_dotenv
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from elevenlabs.client import ElevenLabs
+import ffmpeg
+import subprocess
+import requests
+from io import BytesIO
+
 load_dotenv()
 
 class BaseHandler:
@@ -56,7 +61,47 @@ class BaseHandler:
             """, (story_id, scene_id, media_type, url, description))
             return dict(cursor.fetchone())
 
-    def fetch_story_data(self, story_id, user_id):
+    def merge_audio_files(self, audio_list, story_id, revision_id):
+        """[{'id': 101, 'media_type': 'audio', 'url': 'https://story-generation-pdf.s3.amazonaws.com/story_6/scene_93/audio_20250422_190005.mp3', 'description': 'AI-generated audio for scene: The Lantern Post'}, {'id': 109, 'media_type': 'audio', 'url': 'https://story-generation-pdf.s3.amazonaws.com/story_6/scene_94/audio_20250423_053837.mp3', 'description': 'AI-generated audio for scene: The Winter Storm'}, {'id': 103, 'media_type': 'audio', 'url': 'https://story-generation-pdf.s3.amazonaws.com/story_6/scene_95/audio_20250422_190413.mp3', 'description': 'AI-generated audio for scene: Guiding Light'}]"""
+        temp_files = []
+        for i, audio in enumerate(audio_list):
+            response = requests.get(audio['url'])
+            temp_file = f"temp_{i}.mp3"
+            with open(temp_file, 'wb') as f:
+                f.write(response.content)
+            temp_files.append(temp_file)
+        
+        # Create a file with list of inputs
+        with open('input.txt', 'w') as f:
+            for file in temp_files:
+                f.write(f"file '{file}'\n")
+        
+        # Merge using ffmpeg command line with -y flag to overwrite without asking
+        output_path = f"combined_audio_{story_id}_{revision_id}.mp3"
+        subprocess.run([
+            'ffmpeg',
+            '-y',
+            '-f', 'concat',
+            '-safe', '0',
+            '-i', 'input.txt',
+            '-c', 'copy',
+            output_path
+        ])
+        
+        # Read the merged file content
+        with open(output_path, 'rb') as f:
+            merged_content = f.read()
+        
+        # Clean up temporary files
+        for file in temp_files:
+            os.remove(file)
+        os.remove('input.txt')
+        os.remove(output_path)  # Also remove the output file after reading
+        
+        return merged_content  # Return the actual file content instead of path
+        
+        
+    def fetch_story_data(self, story_id, user_id, format=None):
         """Fetch story and scenes data from database."""
         with self.conn.cursor(cursor_factory=RealDictCursor) as cursor:
             # Fetch story with scenes in a single query
@@ -86,7 +131,7 @@ class BaseHandler:
                     FROM core_scene sc
                     LEFT JOIN core_media m ON m.scene_id = sc.id
                     WHERE sc.story_id IN (SELECT id FROM story)
-                    and m.media_type = 'image'
+                    and m.media_type = %s
                     GROUP BY sc.id, sc.title, sc.content, sc.scene_description, sc."order"
                 )
                 SELECT 
@@ -106,7 +151,7 @@ class BaseHandler:
                     SELECT id FROM core_scene WHERE story_id = s.id
                 )
                 GROUP BY s.id, s.title, s.content
-            """, (story_id, user_id))
+            """, (story_id, user_id, format))
             
             result = cursor.fetchone()
             if not result:
