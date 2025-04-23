@@ -4,7 +4,7 @@ import json
 from dotenv import load_dotenv
 import psycopg2
 from psycopg2.extras import RealDictCursor
-
+from elevenlabs.client import ElevenLabs
 load_dotenv()
 
 class BaseHandler:
@@ -24,6 +24,9 @@ class BaseHandler:
         self.s3_client = boto3.client('s3', region_name=aws_region)
         self.sqs_client = boto3.client('sqs', region_name=aws_region)
         self.bucket_name = os.getenv('AWS_STORAGE_BUCKET_NAME')
+        self.elevenlabs_client = ElevenLabs(
+            api_key=os.getenv("ELEVENLABS_API_KEY"),
+        )
 
     def create_revision(self, story_id, format, url=None, sub_format=None):
         """Create a new revision for a story."""
@@ -34,7 +37,25 @@ class BaseHandler:
                 RETURNING id
             """, (story_id, format, url, sub_format))
             return dict(cursor.fetchone())
-        
+    
+    def fetch_scene_data(self, scene_id, story_id):
+        """Fetch scene data from database."""
+        with self.conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute("""
+                SELECT id, title, content, scene_description, "order" FROM core_scene WHERE id = %s AND story_id = %s
+            """, (scene_id, story_id))
+            return dict(cursor.fetchone())
+
+    def insert_media(self, story_id, scene_id, media_type, url, description=None):
+        """Insert media into database."""
+        with self.conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute("""
+                INSERT INTO core_media (story_id, scene_id, media_type, url, created_at, description)
+                VALUES (%s, %s, %s, %s, NOW(), %s)
+                RETURNING id
+            """, (story_id, scene_id, media_type, url, description))
+            return dict(cursor.fetchone())
+
     def fetch_story_data(self, story_id, user_id):
         """Fetch story and scenes data from database."""
         with self.conn.cursor(cursor_factory=RealDictCursor) as cursor:
@@ -65,6 +86,7 @@ class BaseHandler:
                     FROM core_scene sc
                     LEFT JOIN core_media m ON m.scene_id = sc.id
                     WHERE sc.story_id IN (SELECT id FROM story)
+                    and m.media_type = 'image'
                     GROUP BY sc.id, sc.title, sc.content, sc.scene_description, sc."order"
                 )
                 SELECT 
@@ -106,12 +128,15 @@ class BaseHandler:
         """Process SQS message."""
         try:
             body = json.loads(message['Body'])
-            story_id = body['story_id']
-            user_id = body['user_id']
-            action = body['action']
-
+            story_id = body.get('story_id')
+            user_id = body.get('user_id')
+            action = body.get('action')
+            scene_id = body.get('scene_id')
+            media_type = body.get('media_type')
             if action == 'generate_pdf_preview':
                 return self.handle_pdf_generation(story_id, user_id)
+            elif action == 'generate_media':
+                return self.handle_media_generation(story_id, scene_id, media_type)
             else:
                 return {'status': 'error', 'error': f'Unknown action: {action}'}
         except Exception as e:
