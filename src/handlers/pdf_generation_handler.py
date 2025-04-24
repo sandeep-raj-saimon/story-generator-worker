@@ -9,8 +9,12 @@ from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.platypus import Paragraph, Spacer
-from PIL import Image
+from reportlab.platypus import Paragraph, Spacer, Image, PageBreak, SimpleDocTemplate
+from reportlab.lib.units import inch
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
+from PIL import Image as PILImage
 import traceback
 from dotenv import load_dotenv
 from .base_handler import BaseHandler
@@ -36,11 +40,270 @@ class PDFGenerationHandler(BaseHandler):
             self.bucket_name = os.getenv('AWS_STORAGE_BUCKET_NAME')
             self.api_base_url = os.getenv('API_BASE_URL', 'http://localhost:8000/api')
             self.openai_api_key = os.getenv('CHATGPT_OPENAI_API_KEY')
+            
+            # Register custom fonts
+            self._register_fonts()
+            
+            # Set up styles
+            self.styles = self._setup_styles()
         except Exception as e:
             print(f"Error initializing PDFGenerationHandler: {str(e)}")
             print("Traceback:")
             print(traceback.format_exc())
             raise
+
+    def _register_fonts(self):
+        """Register custom fonts for PDF generation."""
+        try:
+            font_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'fonts')
+            pdfmetrics.registerFont(TTFont('PlayfairDisplay', os.path.join(font_dir, 'PlayfairDisplay-Regular.ttf')))
+            pdfmetrics.registerFont(TTFont('BalooBhai', os.path.join(font_dir, 'BalooBhai-Regular.ttf')))
+            pdfmetrics.registerFont(TTFont('Poppins', os.path.join(font_dir, 'Poppins-Regular.ttf')))
+        except Exception as e:
+            print(f"Warning: Could not register custom fonts: {str(e)}")
+            # Fallback to default fonts
+            pass
+
+    def _setup_styles(self):
+        """Setup custom paragraph styles for different elements."""
+        styles = getSampleStyleSheet()
+        
+        styles.add(ParagraphStyle(
+            name='CoverTitle',
+            fontName='PlayfairDisplay',
+            fontSize=36,
+            alignment=TA_CENTER,
+            spaceAfter=30,
+            textColor=colors.HexColor('#1a365d')
+        ))
+        
+        styles.add(ParagraphStyle(
+            name='CoverSubtitle',
+            fontName='Poppins',
+            fontSize=18,
+            alignment=TA_CENTER,
+            spaceAfter=20,
+            textColor=colors.HexColor('#4a5568')
+        ))
+        
+        styles.add(ParagraphStyle(
+            name='SceneTitle',
+            fontName='BalooBhai',
+            fontSize=24,
+            alignment=TA_CENTER,
+            spaceBefore=20,
+            spaceAfter=20,
+            textColor=colors.HexColor('#2d3748')
+        ))
+        
+        styles.add(ParagraphStyle(
+            name='SceneContent',
+            fontName='Poppins',
+            fontSize=12,
+            alignment=TA_JUSTIFY,
+            leading=18,
+            spaceAfter=12
+        ))
+        
+        styles.add(ParagraphStyle(
+            name='Footer',
+            fontName='Poppins',
+            fontSize=10,
+            alignment=TA_CENTER,
+            textColor=colors.HexColor('#718096')
+        ))
+        
+        return styles
+
+    def _create_cover_page(self, canvas, doc, story_data, user_data):
+        """Create a decorative cover page."""
+        canvas.saveState()
+        
+        # Add background texture or image
+        try:
+            if os.getenv('PDF_COVER_BACKGROUND'):
+                img = Image(os.getenv('PDF_COVER_BACKGROUND'))
+                img.drawHeight = doc.height
+                img.drawWidth = doc.width
+                img.drawOn(canvas, 0, 0)
+        except:
+            # Fallback to a gradient background
+            canvas.setFillColor(colors.HexColor('#f7fafc'))
+            canvas.rect(0, 0, doc.width, doc.height, fill=1)
+        
+        # Add title
+        title = Paragraph(story_data['title'], self.styles['CoverTitle'])
+        title.wrapOn(canvas, doc.width - 2*inch, doc.height)
+        title.drawOn(canvas, inch, doc.height - 3*inch)
+        
+        # Add subtitle if exists
+        if story_data.get('subtitle'):
+            subtitle = Paragraph(story_data['subtitle'], self.styles['CoverSubtitle'])
+            subtitle.wrapOn(canvas, doc.width - 2*inch, doc.height)
+            subtitle.drawOn(canvas, inch, doc.height - 4*inch)
+        
+        # Add author and narrator info
+        author_info = Paragraph(
+            f"Written by {user_data.get('full_name', user_data['username'])}<br/>Narrated by AI",
+            self.styles['CoverSubtitle']
+        )
+        author_info.wrapOn(canvas, doc.width - 2*inch, doc.height)
+        author_info.drawOn(canvas, inch, 2*inch)
+        
+        # Add watermark
+        canvas.setFont('Poppins', 8)
+        canvas.setFillColor(colors.HexColor('#cbd5e0'))
+        canvas.drawString(doc.width - 2*inch, 0.5*inch, "Generated by StoryScape AI")
+        
+        canvas.restoreState()
+
+    def _create_footer(self, canvas, doc):
+        """Create footer with page numbers."""
+        canvas.saveState()
+        
+        # Add page number
+        canvas.setFont('Poppins', 10)
+        canvas.setFillColor(colors.HexColor('#718096'))
+        page_number = f"Page {doc.page} of {doc.page_count}"
+        canvas.drawString(doc.width/2 - 1*inch, 0.5*inch, page_number)
+        
+        # Add logo if exists
+        try:
+            if os.getenv('PDF_LOGO'):
+                logo = Image(os.getenv('PDF_LOGO'))
+                logo.drawHeight = 0.3*inch
+                logo.drawWidth = 0.3*inch
+                logo.drawOn(canvas, 0.5*inch, 0.3*inch)
+        except:
+            pass
+        
+        canvas.restoreState()
+
+    def _process_image(self, image_url):
+        """Process and optimize image for PDF."""
+        try:
+            response = requests.get(image_url)
+            img = PILImage.open(BytesIO(response.content))
+            
+            # Resize image if too large
+            max_width = 6*inch
+            max_height = 4*inch
+            ratio = min(max_width/img.width, max_height/img.height)
+            new_size = (int(img.width * ratio), int(img.height * ratio))
+            
+            img = img.resize(new_size, PILImage.Resampling.LANCZOS)
+            
+            # Save to BytesIO
+            img_byte_arr = BytesIO()
+            img.save(img_byte_arr, format='JPEG', quality=85)
+            img_byte_arr.seek(0)
+            
+            return Image(img_byte_arr)
+        except Exception as e:
+            print(f"Error processing image: {e}")
+            return None
+    
+    def generate_pdf(self, story_data, user_data):
+        print('story_data is ', story_data)
+        """Generate PDF from story data with improved styling."""
+        try:
+            print("Starting PDF generation")
+            buffer = BytesIO()
+            doc = SimpleDocTemplate(
+                buffer,
+                pagesize=letter,
+                rightMargin=72,
+                leftMargin=72,
+                topMargin=72,
+                bottomMargin=72
+            )
+            
+            # Build the story content
+            story_content = []
+            
+            # Add cover page
+            doc.build([], onFirstPage=lambda c, d: self._create_cover_page(c, d, story_data, user_data))
+            
+            # Add scenes
+            for i, scene in enumerate(story_data['scenes'], 1):
+                # Add scene title
+                scene_title = Paragraph(
+                    f"Scene {i}: {scene['title']}",
+                    self.styles['SceneTitle']
+                )
+                story_content.append(scene_title)
+                print('scene is ', scene)
+                # Add scene content
+                scene_content = Paragraph(
+                    scene['content'],
+                    self.styles['SceneContent']
+                )
+                story_content.append(scene_content)
+                
+                # Add scene image if present
+                if scene.get('media'):
+                    for media in scene['media']:
+                        if media['media_type'] == 'image':
+                            img = self._process_image(media['url'])
+                            if img:
+                                story_content.append(Spacer(1, 0.5*inch))
+                                story_content.append(img)
+                                story_content.append(Spacer(1, 0.5*inch))
+                
+                # Add page break between scenes
+                if i < len(story_data['scenes']):
+                    story_content.append(PageBreak())
+            
+            # Build the PDF with footer
+            doc.build(
+                story_content,
+                onFirstPage=lambda c, d: self._create_cover_page(c, d, story_data, user_data),
+                onLaterPages=self._create_footer
+            )
+            
+            print("Completed PDF generation")
+            return buffer.getvalue()
+            
+        except Exception as e:
+            error_msg = f"Failed to generate PDF: {str(e)}\nTraceback:\n{traceback.format_exc()}"
+            print(error_msg)
+            raise Exception(error_msg)
+
+    def handle_pdf_generation(self, story_id, user_id):
+        """Handle PDF generation request."""
+        try:
+            # Fetch story and user data
+            story_data = self.fetch_story_data(story_id, user_id, 'image')
+            user_data = self.fetch_user_data(user_id)
+            
+            # Generate PDF
+            pdf_data = self.generate_pdf(story_data, user_data)
+            
+            # Create revision record
+            revision_id = self.create_revision(story_id, 'pdf')
+            
+            # Upload to S3
+            pdf_url = self.upload_to_s3(pdf_data, story_id, revision_id['id'], 'pdf')
+            
+            # Update revision with URL
+            self.update_revision(revision_id['id'], pdf_url)
+            
+            # Send notification
+            self.send_notification(story_id, user_id, pdf_url, revision_id['id'])
+            
+            return {
+                'status': 'success',
+                'message': 'PDF generated successfully',
+                'url': pdf_url
+            }
+            
+        except Exception as e:
+            error_msg = f"Failed to generate PDF: {str(e)}\nTraceback:\n{traceback.format_exc()}"
+            print(error_msg)
+            return {
+                'status': 'error',
+                'error': error_msg
+            }
 
     def fetch_story_data(self, story_id, user_id, format=None):
         """Fetch story and scenes data from database."""
@@ -51,78 +314,10 @@ class PDFGenerationHandler(BaseHandler):
             print(error_msg)
             raise Exception(error_msg)
 
-    def generate_pdf(self, story_data):
-        """Generate PDF from story data."""
-        try:
-            print("Starting PDF generation")
-            buffer = BytesIO()
-            pdf = canvas.Canvas(buffer, pagesize=letter)
-            width, height = letter
-            
-            # Set up styles
-            styles = getSampleStyleSheet()
-            content_style = ParagraphStyle(
-                'Content',
-                parent=styles['Normal'],
-                fontSize=14,
-                leading=20,
-                alignment=4  # Justified text
-            )
-            
-            # Add scenes in order
-            for i, scene in enumerate(story_data['scenes']):
-                # Create new page for all scenes except the first one
-                if i > 0:
-                    pdf.showPage()
-                
-                # Add scene content at the top third of the page
-                scene_content = Paragraph(scene['content'], content_style)
-                text_height = height * 0.3  # Reserve top 30% for text
-                scene_content.wrapOn(pdf, width - 100, text_height)
-                scene_content.drawOn(pdf, 50, height - text_height)
-                
-                # Add scene's image if present
-                if scene.get('media'):
-                    for media in scene['media']:
-                        if media['media_type'] == 'image':
-                            try:
-                                print(f"Downloading image from: {media['url']}")
-                                response = requests.get(media['url'])
-                                if response.status_code == 200:
-                                    # Create a temporary file
-                                    with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp_file:
-                                        # Save the image to the temporary file
-                                        img = Image.open(BytesIO(response.content))
-                                        if img.mode == 'RGBA':
-                                            img = img.convert('RGB')
-                                        img.save(tmp_file.name, 'JPEG')
-                                        
-                                        # Calculate image dimensions for bottom 60% of page
-                                        img_width = width - 100  # Leave margins
-                                        img_height = height * 0.6  # Use 60% of page height
-                                        
-                                        # Draw image in bottom portion
-                                        pdf.drawImage(tmp_file.name, 50, 50, width=img_width, height=img_height)
-                                        print(f"Successfully added image to PDF")
-                                        
-                                        # Clean up the temporary file
-                                        os.unlink(tmp_file.name)
-                            except Exception as e:
-                                print(f"Failed to add image {media['url']}: {str(e)}")
-                                print(traceback.format_exc())
-                                continue
-            
-            print("Completed PDF generation")
-            pdf.save()
-            return buffer.getvalue()
-            
-        except Exception as e:
-            error_msg = f"Failed to generate PDF: {str(e)}\nTraceback:\n{traceback.format_exc()}"
-            print(error_msg)
-            raise Exception(error_msg)
-
     def update_revision(self, revision_id, pdf_url):
         """Update revision with PDF URL."""
+        print('pdf_url is ', pdf_url)
+        print('revision_id is ', revision_id)
         try:
             self.conn.cursor().execute("UPDATE core_revision SET url = %s WHERE id = %s", (pdf_url, revision_id))
             self.conn.commit()
@@ -328,45 +523,6 @@ class PDFGenerationHandler(BaseHandler):
             
         except Exception as e:
             error_msg = f"Error handling media generation: {str(e)}\nTraceback:\n{traceback.format_exc()}"
-            print(error_msg)
-            return {
-                'status': 'error',
-                'error': error_msg
-            }
-    
-    def handle_pdf_generation(self, story_id, user_id):
-        """Handle PDF generation request."""
-        try:
-            print(f"Starting PDF generation for story_id: {story_id}, user_id: {user_id}")
-            
-            # Fetch story data
-            story_data = self.fetch_story_data(story_id, user_id, 'image')
-            print("Successfully fetched story data")
-            
-            # Generate PDF
-            pdf_data = self.generate_pdf(story_data)
-            print("Successfully generated PDF")
-            
-            revision = self.create_revision(story_id, 'pdf')
-            print(f"Successfully created revision", revision)
-
-            # Upload to S3
-            pdf_url = self.upload_to_s3(pdf_data, story_id, revision['id'], 'pdf')
-            print(f"Successfully uploaded PDF to S3: {pdf_url}")
-            
-            self.update_revision(revision['id'], pdf_url)
-            print(f"Successfully updated revision", revision)
-            # Send notification
-            self.send_notification(story_id, user_id, pdf_url, user_id)
-            print("Successfully sent notification")
-            
-            return {
-                'status': 'success',
-                'pdf_url': pdf_url
-            }
-            
-        except Exception as e:
-            error_msg = f"Error handling PDF generation: {str(e)}\nTraceback:\n{traceback.format_exc()}"
             print(error_msg)
             return {
                 'status': 'error',

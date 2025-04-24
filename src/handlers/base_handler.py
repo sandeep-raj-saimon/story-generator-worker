@@ -43,6 +43,14 @@ class BaseHandler:
             """, (story_id, format, url, sub_format))
             return dict(cursor.fetchone())
     
+    def fetch_user_data(self, user_id):
+        """Fetch user data from database."""
+        with self.conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute("""
+                SELECT id, username, email FROM core_user WHERE id = %s
+            """, (user_id,))
+            return dict(cursor.fetchone())
+        
     def fetch_scene_data(self, scene_id, story_id):
         """Fetch scene data from database."""
         with self.conn.cursor(cursor_factory=RealDictCursor) as cursor:
