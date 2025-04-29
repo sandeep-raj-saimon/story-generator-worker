@@ -33,6 +33,13 @@ class BaseHandler:
             api_key=os.getenv("ELEVENLABS_API_KEY"),
         )
 
+    def update_old_media(self, story_id, scene_id):
+        """Update old media to inactive."""
+        with self.conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute("""
+                UPDATE core_media SET is_active = FALSE WHERE story_id = %s AND scene_id = %s
+            """, (story_id, scene_id))
+
     def create_revision(self, story_id, format, url=None, sub_format=None):
         """Create a new revision for a story."""
         with self.conn.cursor(cursor_factory=RealDictCursor) as cursor:
@@ -63,8 +70,8 @@ class BaseHandler:
         """Insert media into database."""
         with self.conn.cursor(cursor_factory=RealDictCursor) as cursor:
             cursor.execute("""
-                INSERT INTO core_media (story_id, scene_id, media_type, url, created_at, description)
-                VALUES (%s, %s, %s, %s, NOW(), %s)
+                INSERT INTO core_media (story_id, scene_id, media_type, url, created_at, description, is_active)
+                VALUES (%s, %s, %s, %s, NOW(), %s, TRUE)
                 RETURNING id
             """, (story_id, scene_id, media_type, url, description))
             return dict(cursor.fetchone())
@@ -140,6 +147,7 @@ class BaseHandler:
                     LEFT JOIN core_media m ON m.scene_id = sc.id
                     WHERE sc.story_id IN (SELECT id FROM story)
                     and m.media_type = %s
+                    and m.is_active = TRUE
                     GROUP BY sc.id, sc.title, sc.content, sc.scene_description, sc."order"
                 )
                 SELECT 
