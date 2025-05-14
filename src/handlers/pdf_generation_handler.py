@@ -448,9 +448,9 @@ class PDFGenerationHandler(BaseHandler):
             if media_type == 'image':
                 # Generate image using OpenAI's DALL-E
                 response = client.images.generate(
-                    model="dall-e-2",
+                    model="dall-e-3",
                     prompt=f"Generate a detailed, high-quality image for this scene: {scene['content']}",
-                    size="256x256",
+                    size="1024x1024",
                     n=1,
                 )
                 
