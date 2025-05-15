@@ -449,7 +449,7 @@ class PDFGenerationHandler(BaseHandler):
                 # Generate image using OpenAI's DALL-E
                 response = client.images.generate(
                     model="dall-e-3",
-                    prompt=f"Generate a detailed, high-quality image for this scene: {scene['content']}",
+                    prompt=f"Create a dynamic comic book panel that brings this scene to life: {scene['scene_description']}. Draw inspiration from classic comic masters - think Jack Kirby's dramatic angles, Todd McFarlane's moody atmospherics, and Jim Lee's detailed character work. Use bold, vibrant colors with high contrast lighting to create visual drama. Frame the composition to maximize emotional impact - if it's an action scene, use dynamic diagonal lines and extreme perspectives; for emotional moments, focus on expressive character close-ups. Include rich background details that enhance the story's setting. Layer in atmospheric effects like speed lines, impact bursts, or mood lighting to amplify the scene's energy. The art style should be professional comic book quality with clean, confident line work, detailed cross-hatching for depth, and strategic use of shadows to create volume. Make every element serve the story - from the character poses to the smallest environmental details. This needs to be a show-stopping panel that makes readers feel the emotion and drama of the moment.",
                     size="1024x1024",
                     n=1,
                 )
