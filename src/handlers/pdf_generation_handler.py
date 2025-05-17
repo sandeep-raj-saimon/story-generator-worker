@@ -270,6 +270,7 @@ class PDFGenerationHandler(BaseHandler):
             raise Exception(error_msg)
 
     def handle_pdf_generation(self, story_id, user_id):
+        story_id, user_id = body.get('story_id'), body.get('user_id')
         """Handle PDF generation request."""
         try:
             # Fetch story and user data
@@ -375,20 +376,17 @@ class PDFGenerationHandler(BaseHandler):
         """Process SQS message for PDF generation."""
         try:
             body = json.loads(message['Body'])
-            story_id = body.get('story_id')
-            user_id = body.get('user_id')
-            scene_id = body.get('scene_id') 
-            media_type = body.get('media_type')
             action = body.get('action')
-            voice_id = body.get('voice_id')
             if action == 'generate_pdf_preview':
-                return self.handle_pdf_generation(story_id, user_id)
+                return self.handle_pdf_generation(body)
             elif action == 'generate_audio_preview':
-                return self.handle_audio_generation(story_id, user_id)
+                return self.handle_audio_preview_generation(body)
             elif action == 'generate_video_preview':
-                return self.handle_video_generation(story_id, user_id)
+                return self.handle_video_generation(body)
             elif action == 'generate_media':
-                return self.handle_media_generation(story_id, scene_id, media_type, voice_id)
+                return self.handle_media_generation(body)
+            elif action == 'generate_entire_audio':
+                return self.handle_entire_audio_generation(body)
             else:
                 return {'status': 'error', 'error': f'Unknown action: {action}'}
         except Exception as e:
@@ -435,52 +433,20 @@ class PDFGenerationHandler(BaseHandler):
                 print(error_msg)
                 continue
 
-    def handle_media_generation(self, story_id, scene_id, media_type, voice_id=None):
+    def handle_media_generation(self, body):
+        story_id, scene_id, media_type, voice_id, previous_request_ids, next_request_ids = (
+            body.get('story_id'),
+            body.get('scene_id'),
+            body.get('media_type'),
+            body.get('voice_id'),
+            body.get('previous_request_ids'),
+            body.get('next_request_ids')
+        )
         """Handle media generation request."""
         try:
-            # Initialize OpenAI client
-            client = OpenAI(api_key=self.openai_api_key)
-            
-            # Fetch scene data
-            scene = self.fetch_scene_data(scene_id, story_id)
-            print(f"Successfully fetched scene data for scene_id: {scene_id}")
-            
             if media_type == 'image':
-                # Generate image using OpenAI's DALL-E
-                response = client.images.generate(
-                    model="dall-e-3",
-                    prompt=f"Create a dynamic comic book panel that brings this scene to life: {scene['scene_description']}. Draw inspiration from classic comic masters - think Jack Kirby's dramatic angles, Todd McFarlane's moody atmospherics, and Jim Lee's detailed character work. Use bold, vibrant colors with high contrast lighting to create visual drama. Frame the composition to maximize emotional impact - if it's an action scene, use dynamic diagonal lines and extreme perspectives; for emotional moments, focus on expressive character close-ups. Include rich background details that enhance the story's setting. Layer in atmospheric effects like speed lines, impact bursts, or mood lighting to amplify the scene's energy. The art style should be professional comic book quality with clean, confident line work, detailed cross-hatching for depth, and strategic use of shadows to create volume. Make every element serve the story - from the character poses to the smallest environmental details. This needs to be a show-stopping panel that makes readers feel the emotion and drama of the moment.",
-                    size="1024x1024",
-                    n=1,
-                )
-                
-                # Get the image URL from OpenAI
-                image_url = response.data[0].url
-                
-                # Download the image
-                image_response = requests.get(image_url)
-                image_data = BytesIO(image_response.content)
-                
-                # Generate a unique filename
-                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                filename = f"story_{story_id}/scene_{scene_id}/image_{timestamp}.png"
-                
-                # Upload to S3
-                self.s3_client.upload_fileobj(
-                    image_data,
-                    self.bucket_name,
-                    filename
-                )
-                
-                # Create S3 URL
-                s3_url = f"https://{self.bucket_name}.s3.amazonaws.com/{filename}"
-                
-                # Update old media to inactive, only one media can be active at a time
-                # self.update_old_media(story_id, scene_id)
-                # print(f"Updated old media to inactive for story_id: {story_id} and scene_id: {scene_id}")
-                # Create Media record
-                self.insert_media(story_id, scene_id, media_type, s3_url, f"AI-generated image for scene: {scene['title']}")
-                print(f"Successfully created media image record")
+                # Initialize OpenAI client
+                s3_url = self.handle_image_generation(story_id, scene_id)
                 return {
                     'status': 'success',
                     'media_url': s3_url
@@ -490,37 +456,8 @@ class PDFGenerationHandler(BaseHandler):
                 if not voice_id:
                     raise Exception("voice_id is required for audio generation")
                 
-                # Generate audio using OpenAI's TTS
-                response = self.elevenlabs_client.text_to_speech.convert(
-                    output_format="mp3_44100_128",
-                    voice_id=voice_id,
-                    text=scene['content']
-                )
-                print(f"Successfully generated audio for scene_id: {scene_id}", response)
-                
-                # Convert generator to bytes
-                audio_bytes = b"".join(response)
-                audio_data = BytesIO(audio_bytes)
-                
-                # Generate a unique filename
-                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                filename = f"story_{story_id}/scene_{scene_id}/audio_{timestamp}.mp3"
-                
-                # Upload to S3
-                self.s3_client.upload_fileobj(
-                    audio_data,
-                    self.bucket_name,
-                    filename
-                )
-                
-                # Create S3 URL
-                s3_url = f"https://{self.bucket_name}.s3.amazonaws.com/{filename}"
-                
-                # Update old media to inactive, only one media can be active at a time
-                # self.update_old_media(story_id, scene_id)
-                # Create Media record
-                self.insert_media(story_id, scene_id, media_type, s3_url, f"AI-generated audio for scene: {scene['title']}")
-                print(f"Successfully created media audio record")
+                # Generate audio using elevenlabs's api for generating audio stream
+                s3_url, _ = self.handle_audio_generation(story_id, media_type, scene_id, voice_id, previous_request_ids, next_request_ids)
                 return {
                     'status': 'success',
                     'media_url': s3_url
@@ -539,7 +476,104 @@ class PDFGenerationHandler(BaseHandler):
                 'error': error_msg
             }
 
-    def handle_audio_generation(self, story_id, user_id):
+    def handle_entire_audio_generation(self, body):
+        story_id, voice_id, previous_request_ids, next_request_ids = (
+            body.get('story_id'),
+            body.get('voice_id'),
+            body.get('previous_request_ids') or [],
+            body.get('next_request_ids') or []
+        )
+        try:
+            scenes_data = self.fetch_scenes_data(story_id)
+            for scene in scenes_data:
+                _, request_id = self.handle_audio_generation(story_id, 'audio', scene['id'], voice_id, previous_request_ids, next_request_ids, scene)
+                previous_request_ids.append(request_id)
+            print(f"Successfully generated audio for all scenes for story_id: {story_id}")
+            return {
+                    'status': 'success',
+                }
+        except Exception as e:
+            error_msg = f"Error handling entire audio generation for story_id: {story_id} {str(e)}\nTraceback:\n{traceback.format_exc()}"
+            print(error_msg)
+            return {
+                'status': 'error',
+                'error': error_msg
+            }
+    
+    def handle_image_generation(self, story_id, scene_id):
+        client = OpenAI(api_key=self.openai_api_key)
+
+        scene = self.fetch_scene_data(scene_id, story_id)
+        print(f"Successfully fetched scene data for scene_id: {scene_id}")
+        # Generate image using OpenAI's DALL-E
+        response = client.images.generate(
+            model="dall-e-3",
+            prompt=f"Create a dynamic comic book panel that brings this scene to life: {scene['scene_description']}. Draw inspiration from classic comic masters - think Jack Kirby's dramatic angles, Todd McFarlane's moody atmospherics, and Jim Lee's detailed character work. Use bold, vibrant colors with high contrast lighting to create visual drama. Frame the composition to maximize emotional impact - if it's an action scene, use dynamic diagonal lines and extreme perspectives; for emotional moments, focus on expressive character close-ups. Include rich background details that enhance the story's setting. Layer in atmospheric effects like speed lines, impact bursts, or mood lighting to amplify the scene's energy. The art style should be professional comic book quality with clean, confident line work, detailed cross-hatching for depth, and strategic use of shadows to create volume. Make every element serve the story - from the character poses to the smallest environmental details. This needs to be a show-stopping panel that makes readers feel the emotion and drama of the moment.",
+            size="1024x1024",
+            n=1,
+        )
+        
+        # Get the image URL from OpenAI
+        image_url = response.data[0].url
+        
+        # Download the image
+        image_response = requests.get(image_url)
+        image_data = BytesIO(image_response.content)
+        
+        # Generate a unique filename
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f"story_{story_id}/scene_{scene_id}/image_{timestamp}.png"
+        
+        # Upload to S3
+        self.s3_client.upload_fileobj(
+            image_data,
+            self.bucket_name,
+            filename
+        )
+        
+        # Create S3 URL
+        s3_url = f"https://{self.bucket_name}.s3.amazonaws.com/{filename}"
+        self.insert_media(story_id, scene_id, 'image', s3_url, f"AI-generated image for scene: {scene['title']}")
+        print(f"Successfully created media image record")
+        return s3_url
+
+    def handle_audio_generation(self, story_id, media_type, scene_id=None, voice_id=None, previous_request_ids=None, next_request_ids=None, scene_data= None):
+        scene = scene_data if scene_data else self.fetch_scene_data(scene_id, story_id)
+        print(f"Successfully fetched scene data for scene_id: {scene_id}")
+        # Generate audio using elevenlabs's api for generating audio stream
+        response = self.generate_audio(scene['content'], scene_id, voice_id, previous_request_ids, next_request_ids)
+        request_id = response.headers["request-id"]
+        
+        print(f"Successfully generated audio for scene_id: {scene_id}", response)
+        
+        # Convert generator to bytes
+        # audio_bytes = b"".join(response.content)
+        audio_data = BytesIO(response.content)
+        
+        # Generate a unique filename
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f"story_{story_id}/scene_{scene_id}/audio_{timestamp}.mp3"
+        
+        # Upload to S3
+        self.s3_client.upload_fileobj(
+            audio_data,
+            self.bucket_name,
+            filename
+        )
+        
+        # Create S3 URL
+        s3_url = f"https://{self.bucket_name}.s3.amazonaws.com/{filename}"
+        
+        # Update old media to inactive, only one media can be active at a time
+        # self.update_old_media(story_id, scene_id)
+        # Create Media record
+        self.insert_media(story_id, scene_id, media_type, s3_url, f"AI-generated audio for scene: {scene['title']}", request_id)
+        print(f"Successfully created media audio record")
+        return s3_url, request_id
+
+
+    def handle_audio_preview_generation(self, body):
+        story_id, user_id = body.get('story_id'), body.get('user_id')
         """Handle audio generation request."""
         # fetch all audios of the story
         try:
@@ -595,7 +629,8 @@ class PDFGenerationHandler(BaseHandler):
                 'error': error_msg
             }
 
-    def handle_video_generation(self, story_id, user_id):
+    def handle_video_generation(self, body):
+        story_id, user_id = body.get('story_id'), body.get('user_id')
         """Handle video generation request."""
         return {
             'status': 'error',

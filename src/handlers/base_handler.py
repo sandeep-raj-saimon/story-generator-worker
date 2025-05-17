@@ -4,12 +4,15 @@ import json
 from dotenv import load_dotenv
 import psycopg2
 from psycopg2.extras import RealDictCursor
+import uuid
+from elevenlabs import VoiceSettings
 from elevenlabs.client import ElevenLabs
 import ffmpeg
 import subprocess
 import requests
 from io import BytesIO
-
+# from pydub import AudioSegment
+import io
 load_dotenv()
 
 class BaseHandler:
@@ -62,18 +65,18 @@ class BaseHandler:
         """Fetch scene data from database."""
         with self.conn.cursor(cursor_factory=RealDictCursor) as cursor:
             cursor.execute("""
-                SELECT id, title, content, scene_description, "order" FROM core_scene WHERE id = %s AND story_id = %s
+                SELECT title, content, scene_description FROM core_scene WHERE id = %s AND story_id = %s
             """, (scene_id, story_id))
             return dict(cursor.fetchone())
 
-    def insert_media(self, story_id, scene_id, media_type, url, description=None):
+    def insert_media(self, story_id, scene_id, media_type, url, description=None, request_id=None):
         """Insert media into database."""
         with self.conn.cursor(cursor_factory=RealDictCursor) as cursor:
             cursor.execute("""
-                INSERT INTO core_media (story_id, scene_id, media_type, url, created_at, description, is_active)
-                VALUES (%s, %s, %s, %s, NOW(), %s, TRUE)
+                INSERT INTO core_media (story_id, scene_id, media_type, url, created_at, description, is_active, request_id)
+                VALUES (%s, %s, %s, %s, NOW(), %s, TRUE, %s)
                 RETURNING id
-            """, (story_id, scene_id, media_type, url, description))
+            """, (story_id, scene_id, media_type, url, description, request_id))
             return dict(cursor.fetchone())
 
     def merge_audio_files(self, audio_list, story_id, revision_id):
@@ -175,6 +178,15 @@ class BaseHandler:
             
             return dict(result)
 
+    def fetch_scenes_data(self, story_id):
+        print(f"Fetching scenes data for story_id: {story_id}")
+        """Fetch scenes data from database."""
+        with self.conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute("""
+                SELECT id, title, content, scene_description FROM core_scene WHERE story_id = %s
+            """, (story_id,))
+            return cursor.fetchall()
+        
     def save_media(self, scene_id, media_type, url, description=None):
         """Save media to database."""
         with self.conn.cursor(cursor_factory=RealDictCursor) as cursor:
@@ -226,7 +238,35 @@ class BaseHandler:
             except Exception as e:
                 print(f"Error in message processing: {str(e)}")
 
+    def generate_audio(self, text, scene_id, voice_id, previous_request_ids, next_request_ids):
+        print(f"Generating audio for scene_id: {scene_id}, request_ids: {previous_request_ids}, {next_request_ids}")
+        response = requests.post(
+            f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream",
+            json={
+                "text": text,
+                "model_id": "eleven_multilingual_v2",
+                # A maximum of three next or previous history item ids can be send
+                "previous_request_ids": previous_request_ids[-3:] if previous_request_ids else [],
+                "next_request_ids": next_request_ids[-3:] if next_request_ids else [],
+            },
+            headers={"xi-api-key": os.getenv("ELEVENLABS_API_KEY")},
+        )
+        if response.status_code != 200:
+            print(f"Error encountered, status: {response.status_code}, "
+                f"content: {response.text}")
+            quit()
+        print(f"Successfully generated audio for scene_id: {scene_id}")
+        return response
+
     def __del__(self):
         """Cleanup."""
         if hasattr(self, 'conn'):
             self.conn.close() 
+
+    def test(self):
+        self.generate_audio('hi', '9BWtsMINqrJLrRacOk9x', [], [])
+
+
+# if __name__ == "__main__":
+#     base_handler = BaseHandler()
+#     base_handler.test()
