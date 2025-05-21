@@ -19,6 +19,7 @@ import traceback
 from dotenv import load_dotenv
 from .base_handler import BaseHandler
 from openai import OpenAI
+import redis
 load_dotenv()
 
 class PDFGenerationHandler(BaseHandler):
@@ -41,6 +42,12 @@ class PDFGenerationHandler(BaseHandler):
             self.api_base_url = os.getenv('API_BASE_URL', 'http://localhost:8000/api')
             self.openai_api_key = os.getenv('CHATGPT_OPENAI_API_KEY')
             
+            # redis connection
+            self.redis_client = redis.Redis(
+                host=os.getenv('REDIS_HOST'),
+                port=os.getenv('REDIS_PORT'),
+                db=os.getenv('REDIS_DB')
+            )
             # Register custom fonts
             self._register_fonts()
             
@@ -269,7 +276,7 @@ class PDFGenerationHandler(BaseHandler):
             print(error_msg)
             raise Exception(error_msg)
 
-    def handle_pdf_generation(self, story_id, user_id):
+    def handle_pdf_generation(self, body):
         story_id, user_id = body.get('story_id'), body.get('user_id')
         """Handle PDF generation request."""
         try:
@@ -414,19 +421,38 @@ class PDFGenerationHandler(BaseHandler):
                 if 'Messages' in response:
                     for message in response['Messages']:
                         print(f"Received message: {message['MessageId']}")
-                        # Process message
-                        result = self.process_message(message)
-                        
-                        # Delete message from queue if successful
-                        if result['status'] == 'success':
-                            self.sqs_client.delete_message(
-                                QueueUrl=queue_url,
-                                ReceiptHandle=message['ReceiptHandle']
-                            )
-                            print(f"Successfully processed and deleted message: {message['MessageId']}")
-                        else:
-                            print(f"Failed to process message: {message['MessageId']}")
-                            print(f"Error: {result['error']}")
+                        try:
+                            message_id = message['MessageId']
+                            # Set key with 5 minute expiration (300 seconds)
+                            is_set = self.redis_client.set(message_id, 1, ex=300, nx=True)
+                            print(f"is_set for message_id: {message_id} is: {is_set}")
+                            if is_set:
+                                try:
+                                    # Process message
+                                    result = self.process_message(message)
+                                    
+                                    # Delete message from queue if successful
+                                    if result['status'] == 'success':
+                                        self.sqs_client.delete_message(
+                                            QueueUrl=queue_url,
+                                            ReceiptHandle=message['ReceiptHandle']
+                                        )
+                                        print(f"Successfully processed and deleted message: {message['MessageId']}")
+                                    else:
+                                        print(f"Failed to process message: {message['MessageId']}")
+                                        print(f"Error: {result['error']}")
+                                finally:
+                                    # Always delete the Redis key after processing, regardless of success/failure
+                                    self.redis_client.delete(message_id)
+                            else:
+                                print(f"Message already being processed by another worker: {message['MessageId']}")
+                        except Exception as e:
+                            # Only delete Redis key if we managed to set it
+                            if 'message_id' in locals():
+                                self.redis_client.delete(message_id)
+                            error_msg = f"Error in message processing loop: {str(e)}\nTraceback:\n{traceback.format_exc()}"
+                            print(error_msg)
+                            continue
                 
             except Exception as e:
                 error_msg = f"Error in message processing loop: {str(e)}\nTraceback:\n{traceback.format_exc()}"
@@ -506,12 +532,33 @@ class PDFGenerationHandler(BaseHandler):
         scene = self.fetch_scene_data(scene_id, story_id)
         print(f"Successfully fetched scene data for scene_id: {scene_id}")
         # Generate image using OpenAI's DALL-E
-        response = client.images.generate(
-            model="dall-e-3",
-            prompt=f"Create a dynamic comic book panel that brings this scene to life: {scene['scene_description']}. Draw inspiration from classic comic masters - think Jack Kirby's dramatic angles, Todd McFarlane's moody atmospherics, and Jim Lee's detailed character work. Use bold, vibrant colors with high contrast lighting to create visual drama. Frame the composition to maximize emotional impact - if it's an action scene, use dynamic diagonal lines and extreme perspectives; for emotional moments, focus on expressive character close-ups. Include rich background details that enhance the story's setting. Layer in atmospheric effects like speed lines, impact bursts, or mood lighting to amplify the scene's energy. The art style should be professional comic book quality with clean, confident line work, detailed cross-hatching for depth, and strategic use of shadows to create volume. Make every element serve the story - from the character poses to the smallest environmental details. This needs to be a show-stopping panel that makes readers feel the emotion and drama of the moment.",
-            size="1024x1024",
+        is_dall_e_2 = self.redis_client.get("is_dall_e_2")
+        if is_dall_e_2:
+            response = client.images.generate(
+                model="dall-e-2",
+                prompt=f"""
+            generate a beautiful image for the following scene: {scene['content']}
+            """,
+            size="256x256",
             n=1,
-        )
+            )
+        else:
+            response = client.images.generate(
+                model="dall-e-3",
+                prompt=f"""
+                You are a professional visual artist illustrating a key scene from a story.
+
+                Draw the following scene with high emotional impact, based purely on the description:  
+                {scene['scene_description']}
+
+                Use bold colors, cinematic lighting, and dramatic composition. Focus on mood, environment, and character emotion.  
+                Do not include any text, speech bubbles, labels, or written elements in the image — it should feel like a painting, not a comic book panel.  
+
+                The artwork should visually express the moment, using dynamic angles, detailed backgrounds, and atmospheric depth — like a powerful storybook illustration, not a graphic novel page.
+                """,
+                size="1024x1024",
+                n=1,
+            )
         
         # Get the image URL from OpenAI
         image_url = response.data[0].url
