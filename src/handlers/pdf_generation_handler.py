@@ -45,7 +45,8 @@ class PDFGenerationHandler(BaseHandler):
             # redis connection
             self.redis_client = redis.Redis(
                 host=os.getenv('REDISHOST'),
-                port=os.getenv('REDISPORT')
+                port=os.getenv('REDISPORT'),
+                password=os.getenv('REDISPASSWORD')
             )
             # Register custom fonts
             self._register_fonts()
