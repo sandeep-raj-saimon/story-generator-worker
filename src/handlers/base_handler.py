@@ -243,7 +243,7 @@ class BaseHandler:
         response = requests.post(
             f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream",
             json={
-                "text": text,
+                "text": 'hi' if self.redis_client.get('is_elevenlabs_test') else text,
                 "model_id": "eleven_multilingual_v2",
                 # A maximum of three next or previous history item ids can be send
                 "previous_request_ids": previous_request_ids[-3:] if previous_request_ids else [],

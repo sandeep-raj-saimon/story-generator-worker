@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from handlers.pdf_generation_handler import PDFGenerationHandler
+from handlers.media_generation_handler import MediaGenerationHandler
 from dotenv import load_dotenv
 
 # Add project root to Python path
@@ -13,7 +13,7 @@ def main():
     queue_url = os.getenv('STORY_GENERATION_QUEUE_URL')
     
     try:
-        handler = PDFGenerationHandler()
+        handler = MediaGenerationHandler()
         handler.start_listening(queue_url)
     except KeyboardInterrupt:
         print("Worker stopped by user")

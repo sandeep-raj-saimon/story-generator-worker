@@ -22,7 +22,7 @@ from openai import OpenAI
 import redis
 load_dotenv()
 
-class PDFGenerationHandler(BaseHandler):
+class MediaGenerationHandler(BaseHandler):
     def __init__(self):
         try:
             super().__init__()
