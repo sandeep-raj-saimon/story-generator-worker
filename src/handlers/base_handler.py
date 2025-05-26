@@ -47,8 +47,8 @@ class BaseHandler:
         """Create a new revision for a story."""
         with self.conn.cursor(cursor_factory=RealDictCursor) as cursor:
             cursor.execute("""
-                INSERT INTO core_revision (story_id, format, url, sub_format, created_at, is_current)
-                VALUES (%s, %s, %s, %s, NOW(), TRUE)
+                INSERT INTO core_revision (story_id, format, url, sub_format, created_at, is_current, is_active)
+                VALUES (%s, %s, %s, %s, NOW(), TRUE, TRUE)
                 RETURNING id
             """, (story_id, format, url, sub_format))
             return dict(cursor.fetchone())
