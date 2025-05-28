@@ -1,4 +1,4 @@
-# Story Generator Worker
+# WhisprTales Worker
 
 A worker service that processes PDF generation requests from SQS and generates PDFs for stories.
 
