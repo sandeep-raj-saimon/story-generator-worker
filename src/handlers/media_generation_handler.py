@@ -20,6 +20,8 @@ from dotenv import load_dotenv
 from .base_handler import BaseHandler
 from openai import OpenAI
 import redis
+import fal_client
+
 load_dotenv()
 
 class MediaGenerationHandler(BaseHandler):
@@ -36,7 +38,7 @@ class MediaGenerationHandler(BaseHandler):
                 'sqs',
                 aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
                 aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'),
-                region_name=os.getenv('AWS_S3_REGION_NAME')
+                region_name=os.getenv('AWS_S3_REGION_NAME'),
             )
             self.bucket_name = os.getenv('AWS_STORAGE_BUCKET_NAME')
             self.api_base_url = os.getenv('API_BASE_URL', 'http://localhost:8000/api')
@@ -48,6 +50,7 @@ class MediaGenerationHandler(BaseHandler):
                 port=os.getenv('REDISPORT'),
                 password=os.getenv('REDISPASSWORD')
             )
+
             # Register custom fonts
             self._register_fonts()
             
@@ -370,10 +373,10 @@ class MediaGenerationHandler(BaseHandler):
         # This could be a WebSocket message, SNS topic, or another SQS queue
         pass
 
-    def process_message(self, message):
+    def process_message(self, body):
         """Process SQS message for PDF generation."""
         try:
-            body = json.loads(message['Body'])
+            # raise Exception('testing')
             action = body.get('action')
             if action == 'generate_pdf_preview':
                 return self.handle_pdf_generation(body)
@@ -398,29 +401,42 @@ class MediaGenerationHandler(BaseHandler):
     def start_listening(self, queue_url):
         """Start listening for SQS messages."""
         print(f"Starting to listen on queue: {queue_url}")
-        queue_url = os.getenv('STORY_GENERATION_QUEUE_URL')
+        queue_url = os.getenv('WHISPR_TALES_QUEUE_URL')
         
         while True:
             try:
                 # Receive message from SQS
                 response = self.sqs_client.receive_message(
                     QueueUrl=queue_url,
-                    MaxNumberOfMessages=1,
-                    WaitTimeSeconds=20
+                    MaxNumberOfMessages=3,
+                    WaitTimeSeconds=10
                 )
-                
+                # {'story_id': 1, 'scene_id': 2, 'media_type': 'image', 'action': 'generate_media', 'credit_cost': 100, 'job_id': '4'}
                 if 'Messages' in response:
                     for message in response['Messages']:
                         print(f"Received message: {message['MessageId']}")
+                        body = json.loads(message['Body'])
                         try:
                             message_id = message['MessageId']
+                            job_id = body.get('job_id')
                             # Set key with 5 minute expiration (300 seconds)
                             is_set = self.redis_client.set(message_id, 1, ex=300, nx=True)
                             print(f"is_set for message_id: {message_id} is: {is_set}")
                             if is_set:
                                 try:
+                                    with self.conn.cursor() as cursor:
+                                        cursor.execute(
+                                            """
+                                            UPDATE core_job 
+                                            SET status = 'processing', 
+                                                started_at = NOW() 
+                                            WHERE id = %s
+                                            """,
+                                            [job_id]
+                                        )
+                                    print(f"Updated job {job_id} status to processing")
                                     # Process message
-                                    result = self.process_message(message)
+                                    result = self.process_message(body)
                                     
                                     # Delete message from queue if successful
                                     if result['status'] == 'success':
@@ -428,8 +444,69 @@ class MediaGenerationHandler(BaseHandler):
                                             QueueUrl=queue_url,
                                             ReceiptHandle=message['ReceiptHandle']
                                         )
+                                        # Update job status to completed
+                                        with self.conn.cursor() as cursor:
+                                            cursor.execute(
+                                                """
+                                                UPDATE core_job 
+                                                SET status = 'completed',
+                                                    completed_at = NOW()
+                                                WHERE id = %s
+                                                """,
+                                                [job_id]
+                                            )
                                         print(f"Successfully processed and deleted message: {message['MessageId']}")
+                                        print('<-------------------------GENERATION COMPLETE------------------------->')
+                                        print()
                                     else:
+                                        # Update job status to failed
+                                        with self.conn.cursor() as cursor:
+                                            cursor.execute(
+                                                """
+                                                UPDATE core_job 
+                                                SET status = 'failed',
+                                                    error_message = %s,
+                                                    completed_at = NOW()
+                                                WHERE id = %s
+                                                """,
+                                                [result['error'], job_id]
+                                            )
+
+                                        # Get credit cost and user id for the failed job
+                                        with self.conn.cursor() as cursor:
+                                            cursor.execute(
+                                                """
+                                                SELECT credit_cost, user_id 
+                                                FROM core_job
+                                                WHERE id = %s
+                                                """, 
+                                                [job_id]
+                                            )
+                                            job_info = cursor.fetchone()
+                                        credit_cost = job_info[0]
+                                        user_id = job_info[1]
+
+                                        # Refund credits to user
+                                        with self.conn.cursor() as cursor:
+                                            cursor.execute(
+                                                """
+                                                UPDATE core_credits
+                                                SET credits_remaining = credits_remaining + %s
+                                                WHERE user_id = %s
+                                                """,
+                                                [credit_cost, user_id]
+                                            )
+
+                                            # Create credit transaction record for refund
+                                            cursor.execute(
+                                                """
+                                                INSERT INTO core_credittransaction
+                                                (user_id, credits_used, transaction_type, created_at, updated_at)
+                                                VALUES (%s, %s, 'credit', NOW(), NOW())
+                                                """,
+                                                [user_id, credit_cost]
+                                            )
+                                        print(f"Updated job {job_id} status to failed")
                                         print(f"Failed to process message: {message['MessageId']}")
                                         print(f"Error: {result['error']}")
                                 finally:
@@ -451,19 +528,21 @@ class MediaGenerationHandler(BaseHandler):
                 continue
 
     def handle_media_generation(self, body):
-        story_id, scene_id, media_type, voice_id, previous_request_ids, next_request_ids = (
+        story_id, scene_id, media_type, voice_id, previous_request_ids, next_request_ids, media_id = (
             body.get('story_id'),
             body.get('scene_id'),
             body.get('media_type'),
             body.get('voice_id'),
             body.get('previous_request_ids'),
-            body.get('next_request_ids')
+            body.get('next_request_ids'),
+            body.get('media_id')
         )
         """Handle media generation request."""
         try:
             if media_type == 'image':
                 # Initialize OpenAI client
                 s3_url = self.handle_image_generation(story_id, scene_id)
+                self.update_old_media(story_id, scene_id, media_id)
                 return {
                     'status': 'success',
                     'media_url': s3_url
@@ -474,7 +553,8 @@ class MediaGenerationHandler(BaseHandler):
                     raise Exception("voice_id is required for audio generation")
                 
                 # Generate audio using elevenlabs's api for generating audio stream
-                s3_url, _ = self.handle_audio_generation(story_id, media_type, scene_id, voice_id, previous_request_ids, next_request_ids)
+                s3_url = self.handle_audio_generation(story_id, media_type, scene_id, voice_id)
+                self.update_old_media(story_id, scene_id, media_id)
                 return {
                     'status': 'success',
                     'media_url': s3_url
@@ -486,6 +566,18 @@ class MediaGenerationHandler(BaseHandler):
             }
             
         except Exception as e:
+            # If media_id is provided, update it as active
+            if media_id:
+                with self.conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        UPDATE core_media 
+                        SET is_active = true
+                        WHERE id = %s
+                        """,
+                        [media_id]
+                    )
+                print(f"Updated media {media_id} as active")
             error_msg = f"Error handling media generation: {str(e)}\nTraceback:\n{traceback.format_exc()}"
             print(error_msg)
             return {
@@ -516,8 +608,58 @@ class MediaGenerationHandler(BaseHandler):
                 'status': 'error',
                 'error': error_msg
             }
-    
+
     def handle_image_generation(self, story_id, scene_id):
+        scene = self.fetch_scene_data(scene_id, story_id)
+        print(f"Successfully fetched scene data for scene_id: {scene_id}")
+        if not os.getenv('FAL_KEY'):
+            raise ValueError("FAL_KEY environment variable is not set")
+
+        def on_queue_update(update):
+            if isinstance(update, fal_client.InProgress):
+                if update.logs:
+                    for log in update.logs:
+                        print(log["message"])
+
+        result = fal_client.subscribe(
+            "fal-ai/flux-1/schnell",
+            arguments={
+                "prompt": f"""
+                        generate a beautiful image for the following scene: {scene['content']}
+                        """
+            },
+            on_queue_update=on_queue_update,
+        )
+        
+        # Get the image URL from FAL
+        image_url = result['images'][0]['url']
+        
+        # Download the image
+        image_response = requests.get(image_url)
+        image_data = BytesIO(image_response.content)
+        
+        # Generate a unique filename
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f"story_{story_id}/scene_{scene_id}/image_{timestamp}.png"
+        
+        # Upload to S3
+        self.s3_client.upload_fileobj(
+            image_data,
+            self.bucket_name,
+            filename,
+            ExtraArgs={'ContentType': 'image/png'}
+        )
+        
+        # Create S3 URL
+        s3_url = f"https://{self.bucket_name}.s3.amazonaws.com/{filename}"
+        
+        # Insert media record
+        self.insert_media(story_id, scene_id, 'image', s3_url, f"AI-generated image for scene")
+        print(f"Successfully created media image record")
+        
+        return s3_url
+
+    def handle_image_generation_openAI(self, story_id, scene_id):
         client = OpenAI(api_key=self.openai_api_key)
 
         scene = self.fetch_scene_data(scene_id, story_id)
@@ -575,7 +717,54 @@ class MediaGenerationHandler(BaseHandler):
         print(f"Successfully created media image record")
         return s3_url
 
-    def handle_audio_generation(self, story_id, media_type, scene_id=None, voice_id=None, previous_request_ids=None, next_request_ids=None, scene_data= None):
+    def handle_audio_generation(self, story_id, media_type, scene_id=None, voice_id = None, scene_data= None):
+        scene = scene_data if scene_data else self.fetch_scene_data(scene_id, story_id)
+        print(f"Successfully fetched scene data for scene_id: {scene_id}")
+
+        url = "https://api.play.ht/api/v2/tts/stream"
+
+        payload = {
+            "text": f'{scene['content']}',
+            "voice": "s3://voice-cloning-zero-shot/d9ff78ba-d016-47f6-b0ef-dd630f59414e/female-cs/manifest.json",
+            "output_format": "mp3",
+            "voice_engine": "PlayHT2.0"
+        }
+        headers = {
+            "accept": "*/*",
+            "content-type": "application/json",
+            "AUTHORIZATION": "ak-d48f0aa4a09047b581ed431eac9b98d1",
+            "X-USER-ID": "TsVLLyxzPpWicWSOw6Ra2EsvbX93"
+        }
+
+        response = requests.post(url, json=payload, headers=headers)
+        print(f"Successfully generated audio for scene_id: {scene_id}", response)
+        
+        # Convert generator to bytes
+        # audio_bytes = b"".join(response.content)
+        audio_data = BytesIO(response.content)
+        
+        # Generate a unique filename
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f"story_{story_id}/scene_{scene_id}/audio_{timestamp}.mp3"
+        
+        # Upload to S3
+        self.s3_client.upload_fileobj(
+            audio_data,
+            self.bucket_name,
+            filename
+        )
+        
+        # Create S3 URL
+        s3_url = f"https://{self.bucket_name}.s3.amazonaws.com/{filename}"
+        
+        # Update old media to inactive, only one media can be active at a time
+        # self.update_old_media(story_id, scene_id)
+        # Create Media record
+        self.insert_media(story_id, scene_id, media_type, s3_url, f"AI-generated audio for scene: {scene['title']}")
+        print(f"Successfully created media audio record")
+        return s3_url
+
+    def handle_audio_generation_old(self, story_id, media_type, scene_id=None, voice_id=None, previous_request_ids=None, next_request_ids=None, scene_data= None):
         scene = scene_data if scene_data else self.fetch_scene_data(scene_id, story_id)
         print(f"Successfully fetched scene data for scene_id: {scene_id}")
         # Generate audio using elevenlabs's api for generating audio stream

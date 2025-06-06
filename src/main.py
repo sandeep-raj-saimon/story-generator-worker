@@ -10,7 +10,7 @@ sys.path.append(str(project_root))
 
 def main():
     load_dotenv()
-    queue_url = os.getenv('STORY_GENERATION_QUEUE_URL')
+    queue_url = os.getenv('WHISPR_TALES_QUEUE_URL')
     
     try:
         handler = MediaGenerationHandler()

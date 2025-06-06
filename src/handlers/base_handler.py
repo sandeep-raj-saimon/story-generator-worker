@@ -35,13 +35,16 @@ class BaseHandler:
         self.elevenlabs_client = ElevenLabs(
             api_key=os.getenv("ELEVENLABS_API_KEY"),
         )
+        self.play_ht_user_id = os.getenv('PLAY_HT_USERID')
+        self.play_ht_key = os.getenv('PLAY_HT_KEY')
 
-    def update_old_media(self, story_id, scene_id):
-        """Update old media to inactive."""
-        with self.conn.cursor(cursor_factory=RealDictCursor) as cursor:
-            cursor.execute("""
-                UPDATE core_media SET is_active = FALSE WHERE story_id = %s AND scene_id = %s
-            """, (story_id, scene_id))
+    def update_old_media(self, story_id, scene_id, media_id):
+        if media_id:
+            """Update old media to inactive."""
+            with self.conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("""
+                    UPDATE core_media SET is_active = FALSE WHERE story_id = %s AND scene_id = %s and id = %s
+                """, (story_id, scene_id, media_id))
 
     def create_revision(self, story_id, format, url=None, sub_format=None):
         """Create a new revision for a story."""
@@ -68,6 +71,17 @@ class BaseHandler:
                 SELECT title, content, scene_description FROM core_scene WHERE id = %s AND story_id = %s
             """, (scene_id, story_id))
             return dict(cursor.fetchone())
+
+    def update_previous_media_inactive(self, story_id, scene_id):
+        """Update previous media to inactive."""
+        with self.conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute("""
+                UPDATE core_media 
+                SET is_active = FALSE 
+                WHERE story_id = %s 
+                AND scene_id = %s 
+                AND is_active = TRUE
+            """, (story_id, scene_id))
 
     def insert_media(self, story_id, scene_id, media_type, url, description=None, request_id=None):
         """Insert media into database."""
