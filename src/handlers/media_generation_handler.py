@@ -21,6 +21,9 @@ from .base_handler import BaseHandler
 from openai import OpenAI
 import redis
 import fal_client
+import subprocess
+from moviepy import ImageClip, AudioFileClip, concatenate_videoclips, CompositeVideoClip
+from moviepy.video.VideoClip import VideoClip
 
 load_dotenv()
 
@@ -288,7 +291,7 @@ class MediaGenerationHandler(BaseHandler):
             pdf_url = self.upload_to_s3(pdf_data, story_id, revision_id['id'], 'pdf')
             
             # Update revision with URL
-            self.update_revision(revision_id['id'], pdf_url)
+            self.update_revision(revision_id['id'], pdf_url, 'pdf', story_id)
             
             # Send notification
             self.send_notification(story_id, user_id, pdf_url, revision_id['id'])
@@ -316,36 +319,50 @@ class MediaGenerationHandler(BaseHandler):
             print(error_msg)
             raise Exception(error_msg)
 
-    def update_revision(self, revision_id, pdf_url):
+    def update_revision(self, revision_id, revision_url, revision_type, story_id):
         """Update revision with PDF URL."""
-        print('pdf_url is ', pdf_url)
+        print('media_url is ', revision_url)
         print('revision_id is ', revision_id)
         try:
-            self.conn.cursor().execute("UPDATE core_revision SET url = %s WHERE id = %s", (pdf_url, revision_id))
+            # First update old revision to not current
+            self.conn.cursor().execute(
+                "UPDATE core_revision SET is_current = false WHERE story_id = %s AND format = %s AND is_current = true",
+                (story_id, revision_type)
+            )
+            # Then update new revision with URL and set as current
+            self.conn.cursor().execute(
+                "UPDATE core_revision SET url = %s, is_current = true WHERE id = %s",
+                (revision_url, revision_id)
+            )
             self.conn.commit()
         except Exception as e:
             error_msg = f"Failed to update revision: {str(e)}\nTraceback:\n{traceback.format_exc()}"
             print(error_msg)
             raise Exception(error_msg)
     
-    def upload_to_s3(self, pdf_data, story_id, revision_id, format):
-        """Upload generated PDF to S3."""
+    def upload_to_s3(self, data, story_id, revision_id, format):
+        """Upload generated file to S3."""
         try:
             filename = f"story_{story_id}/preview_{revision_id}.{format}"
             
-            print(f"Attempting to upload PDF to S3: {filename}")
-            content_type = 'audio/mpeg' if format == 'mp3' else 'application/pdf'
+            print(f"Attempting to upload {format} to S3: {filename}")
+            content_type = {
+                'pdf': 'application/pdf',
+                'mp3': 'audio/mpeg',
+                'mp4': 'video/mp4'
+            }.get(format, 'application/octet-stream')
+            
             self.s3_client.put_object(
                 Bucket=self.bucket_name,
                 Key=filename,
-                Body=pdf_data,
+                Body=data,
                 ContentType=content_type
             )
             print(f"Successfully uploaded {format} to S3")
             
             return f"https://{self.bucket_name}.s3.amazonaws.com/{filename}"
         except Exception as e:
-            error_msg = f"Failed to upload PDF to S3: {str(e)}\nTraceback:\n{traceback.format_exc()}"
+            error_msg = f"Failed to upload {format} to S3: {str(e)}\nTraceback:\n{traceback.format_exc()}"
             print(error_msg)
             raise Exception(error_msg)
 
@@ -543,6 +560,8 @@ class MediaGenerationHandler(BaseHandler):
                 # Initialize OpenAI client
                 s3_url = self.handle_image_generation(story_id, scene_id)
                 self.update_old_media(story_id, scene_id, media_id)
+                lock_key = f"scene_{scene_id}_{media_type}_lock"
+                self.redis_client.delete(lock_key)
                 return {
                     'status': 'success',
                     'media_url': s3_url
@@ -555,6 +574,8 @@ class MediaGenerationHandler(BaseHandler):
                 # Generate audio using elevenlabs's api for generating audio stream
                 s3_url = self.handle_audio_generation(story_id, media_type, scene_id, voice_id)
                 self.update_old_media(story_id, scene_id, media_id)
+                lock_key = f"scene_{scene_id}_{media_type}_lock"
+                self.redis_client.delete(lock_key)
                 return {
                     'status': 'success',
                     'media_url': s3_url
@@ -625,7 +646,7 @@ class MediaGenerationHandler(BaseHandler):
             "fal-ai/flux-1/schnell",
             arguments={
                 "prompt": f"""
-                        generate a beautiful image for the following scene: {scene['content']}
+                        generate a beautiful image for the following scene: {scene['scene_description']}
                         """
             },
             on_queue_update=on_queue_update,
@@ -725,17 +746,16 @@ class MediaGenerationHandler(BaseHandler):
 
         payload = {
             "text": f'{scene['content']}',
-            "voice": "s3://voice-cloning-zero-shot/d9ff78ba-d016-47f6-b0ef-dd630f59414e/female-cs/manifest.json",
+            "voice": voice_id,
             "output_format": "mp3",
             "voice_engine": "PlayHT2.0"
         }
         headers = {
             "accept": "*/*",
             "content-type": "application/json",
-            "AUTHORIZATION": "ak-d48f0aa4a09047b581ed431eac9b98d1",
-            "X-USER-ID": "TsVLLyxzPpWicWSOw6Ra2EsvbX93"
+            "AUTHORIZATION": os.getenv('PLAY_HT_KEY'),
+            "X-USER-ID": os.getenv('PLAY_HT_USERID')
         }
-
         response = requests.post(url, json=payload, headers=headers)
         print(f"Successfully generated audio for scene_id: {scene_id}", response)
         
@@ -836,7 +856,7 @@ class MediaGenerationHandler(BaseHandler):
             # TODO: Implement audio concatenation logic here
             # For now just return the first audio URL
             
-            self.update_revision(revision['id'], audio_url)
+            self.update_revision(revision['id'], audio_url, 'audio', story_id)
             print(f"Successfully updated revision with audio URL")
 
             # Send notification
@@ -857,9 +877,69 @@ class MediaGenerationHandler(BaseHandler):
             }
 
     def handle_video_generation(self, body):
-        story_id, user_id = body.get('story_id'), body.get('user_id')
-        """Handle video generation request."""
-        return {
-            'status': 'error',
-            'error': 'Video generation not implemented'
-        } 
+        story_id = body.get('story_id')
+        user_id = body.get('user_id')
+        
+        try:
+            print(f"Starting video generation for story_id={story_id}, user_id={user_id}")
+            
+            # 1) Fetch story + media metadata
+            story_data = self.fetch_story_data(story_id, user_id, format=['image', 'audio'])
+            revision = self.create_revision(story_id, 'video')
+            print(f"Fetched story and created revision {revision['id']}")
+            
+            video_clips = []
+            
+            # 2) Work in a temp dir
+            with tempfile.TemporaryDirectory() as temp_dir:
+                for scene in story_data['scenes']:
+                    sid = scene['id']
+                    print(f"\n-- Scene {sid} --")
+                    
+                    # find image + audio
+                    img_meta = next((m for m in scene['media'] if m['media_type']=='image'), None)
+                    aud_meta = next((m for m in scene['media'] if m['media_type']=='audio'), None)
+                    if not img_meta or not aud_meta:
+                        print(f"Skipping scene {sid}: missing media")
+                        continue
+                    
+                    img_path = os.path.join(temp_dir, f"scene_{sid}.png")
+                    aud_path = os.path.join(temp_dir, f"scene_{sid}.mp3")
+                    
+                    # download image
+                    r = requests.get(img_meta['url']); r.raise_for_status()
+                    with open(img_path, 'wb') as f: f.write(r.content)
+                    PILImage.open(img_path).verify()
+                    
+                    # download audio
+                    r = requests.get(aud_meta['url']); r.raise_for_status()
+                    with open(aud_path, 'wb') as f: f.write(r.content)
+                    
+                    # build clip
+                    audio = AudioFileClip(aud_path)
+                    image = ImageClip(img_path, duration=audio.duration)
+                    clip  = image.with_audio(audio)
+                    
+                    video_clips.append(clip)
+                    print(f"Added scene {sid} (duration {audio.duration:.2f}s)")
+                
+                if not video_clips:
+                    raise RuntimeError("No valid clips generated")
+                
+                # 3) concatenate + write file
+                final = concatenate_videoclips(video_clips, method="compose")
+                out_path = os.path.join(temp_dir, f"story_{story_id}.mp4")
+                final.write_videofile(out_path, codec='libx264', audio_codec='aac', fps=24)
+                
+                # 4) upload + notify
+                with open(out_path,'rb') as f:
+                    url = self.upload_to_s3(f.read(), story_id, revision['id'], 'mp4')
+                self.update_revision(revision['id'], url, 'video', story_id)
+                self.send_notification(story_id, user_id, url, revision['id'])
+                
+                return {'status':'success','video_url':url}
+        
+        except Exception as e:
+            tb = traceback.format_exc()
+            print(f"Error: {e}\n{tb}")
+            return {'status':'error','error':f"{e}\n{tb}"}

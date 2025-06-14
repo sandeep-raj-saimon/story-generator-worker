@@ -135,6 +135,11 @@ class BaseHandler:
         
     def fetch_story_data(self, story_id, user_id, format=None):
         """Fetch story and scenes data from database."""
+        # Handle format parameter for the query
+        if isinstance(format, list):
+            format = tuple(format)  # Convert list to tuple for SQL IN clause
+        else:
+            format = (format,)  # Create single element tuple
         with self.conn.cursor(cursor_factory=RealDictCursor) as cursor:
             # Fetch story with scenes in a single query
             cursor.execute("""
@@ -163,7 +168,7 @@ class BaseHandler:
                     FROM core_scene sc
                     LEFT JOIN core_media m ON m.scene_id = sc.id
                     WHERE sc.story_id IN (SELECT id FROM story)
-                    and m.media_type = %s
+                    and m.media_type in %s
                     and m.is_active = TRUE
                     GROUP BY sc.id, sc.title, sc.content, sc.scene_description, sc."order"
                 )
