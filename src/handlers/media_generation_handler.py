@@ -545,14 +545,15 @@ class MediaGenerationHandler(BaseHandler):
                 continue
 
     def handle_media_generation(self, body):
-        story_id, scene_id, media_type, voice_id, previous_request_ids, next_request_ids, media_id = (
+        story_id, scene_id, media_type, voice_id, previous_request_ids, next_request_ids, media_id, language = (
             body.get('story_id'),
             body.get('scene_id'),
             body.get('media_type'),
             body.get('voice_id'),
             body.get('previous_request_ids'),
             body.get('next_request_ids'),
-            body.get('media_id')
+            body.get('media_id'),
+            body.get('language')
         )
         """Handle media generation request."""
         try:
@@ -572,7 +573,7 @@ class MediaGenerationHandler(BaseHandler):
                     raise Exception("voice_id is required for audio generation")
                 
                 # Generate audio using elevenlabs's api for generating audio stream
-                s3_url = self.handle_audio_generation(story_id, media_type, scene_id, voice_id)
+                s3_url = self.handle_audio_generation(story_id, media_type, scene_id, voice_id, language)
                 self.update_old_media(story_id, scene_id, media_id)
                 lock_key = f"scene_{scene_id}_{media_type}_lock"
                 self.redis_client.delete(lock_key)
@@ -738,17 +739,18 @@ class MediaGenerationHandler(BaseHandler):
         print(f"Successfully created media image record")
         return s3_url
 
-    def handle_audio_generation(self, story_id, media_type, scene_id=None, voice_id = None, scene_data= None):
+    def handle_audio_generation(self, story_id, media_type, scene_id=None, voice_id = None, scene_data= None, language=None):
         scene = scene_data if scene_data else self.fetch_scene_data(scene_id, story_id)
         print(f"Successfully fetched scene data for scene_id: {scene_id}")
 
         url = "https://api.play.ht/api/v2/tts/stream"
-
         payload = {
             "text": f'{scene['content']}',
             "voice": voice_id,
             "output_format": "mp3",
-            "voice_engine": "PlayHT2.0"
+            "voice_engine": "PlayHT2.0" if language == "en-US" else "Play3.0-mini",
+            "language": "english" if language == "en-US" else "hindi" 
+
         }
         headers = {
             "accept": "*/*",
@@ -758,7 +760,6 @@ class MediaGenerationHandler(BaseHandler):
         }
         response = requests.post(url, json=payload, headers=headers)
         print(f"Successfully generated audio for scene_id: {scene_id}", response)
-        
         # Convert generator to bytes
         # audio_bytes = b"".join(response.content)
         audio_data = BytesIO(response.content)
